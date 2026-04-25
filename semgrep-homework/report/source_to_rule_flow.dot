@@ -1,0 +1,31 @@
+digraph semgrep_flow {
+  graph [rankdir=LR, bgcolor="white", splines=ortho, nodesep="0.5", ranksep="0.8"];
+  node [shape=box, style="rounded,filled", fontname="PingFang SC", fontsize=12, color="#23415c", fillcolor="#eef6ff", margin="0.18,0.12"];
+  edge [fontname="PingFang SC", fontsize=10, color="#456b8c"];
+
+  source1 [label="Source 1\napp.py:98 q = request.args.get('q', '')"];
+  source2 [label="Source 2\napp.py:106 eq = request.args.get('email', '')"];
+  source3 [label="Source 3\napp.py:60-65 request.form[...] -> db.create_user(...)"];
+
+  bridge1 [label="跨模块调用\ndb.find_user(q)"];
+  bridge2 [label="跨模块调用\ndb.find_user_by_email(eq)"];
+  bridge3 [label="跨模块调用\ndb.create_user(username, pw_hash, email)"];
+
+  judge [label="人工判据\n1. 先把外部输入拼进 SQL 字符串\n2. 再把该字符串交给 execute()\n3. 没有参数化占位符 + 参数元组"];
+  rule [label="Semgrep 规则\npython.dbapi.sql-string-build-to-execute"];
+  sink1 [label="Sink 1\ndb.py:39-40 % 格式化 -> cur.execute(query)"];
+  sink2 [label="Sink 2\ndb.py:50-51 f-string -> cur.execute(query)"];
+  sink3 [label="Sink 3\ndb.py:61-64 .format() -> cur.execute(query)"];
+  fix [label="修复方向\n改为参数化查询\nexecute(sql, params)"];
+
+  source1 -> bridge1 -> judge;
+  source2 -> bridge2 -> judge;
+  source3 -> bridge3 -> judge;
+  judge -> rule;
+  rule -> sink1;
+  rule -> sink2;
+  rule -> sink3;
+  sink1 -> fix;
+  sink2 -> fix;
+  sink3 -> fix;
+}

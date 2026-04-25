@@ -1,0 +1,43 @@
+$ HOME=$PWD/25140919yangchangye-pkg/semgrep-homework/.semgrep-home SSL_CERT_FILE=/etc/ssl/cert.pem SEMGREP_SEND_METRICS=off SEMGREP_ENABLE_VERSION_CHECK=0 semgrep scan -c 25140919yangchangye-pkg/semgrep-homework/rules/python-dbapi-sql-string-build.yaml 25140919yangchangye-pkg/semgrep-homework/tests/python_dbapi_sql_string_build_cases.py
+               
+               
+┌─────────────┐
+│ Scan Status │
+└─────────────┘
+  Scanning 1 file tracked by git with 1 Code rule:
+  Scanning 1 file.
+                
+                
+┌──────────────┐
+│ Scan Summary │
+└──────────────┘
+✅ Scan completed successfully.
+ • Findings: 3 (3 blocking)
+ • Rules run: 1
+ • Targets scanned: 1
+ • Parsed lines: ~100.0%
+ • No ignore information available
+Ran 1 rule on 1 file: 3 findings.
+                   
+                   
+┌─────────────────┐
+│ 3 Code Findings │
+└─────────────────┘
+                                                                                         
+    25140919yangchangye-pkg/semgrep-homework/tests/python_dbapi_sql_string_build_cases.py
+   ❯❯❱ 25140919yangchangye-pkg.semgrep-homework.rules.python.dbapi.sql-string-build-to-execute
+          ❰❰ Blocking ❱❱
+          Potential SQL injection: SQL is built with Python string interpolation and then passed into
+          execute(). Use parameterized queries instead.                                              
+                                                                                                     
+            5┆ query = "SELECT * FROM users WHERE username = '%s'" % username
+            6┆ cur.execute(query)
+            ⋮┆----------------------------------------
+           10┆ query = f"SELECT * FROM users WHERE email = '{email}'"
+           11┆ cur.execute(query)
+            ⋮┆----------------------------------------
+           15┆ query = "INSERT INTO users (username, pw_hash, email) VALUES ('{}', '{}', '{}')".format(
+           16┆     username, pw_hash, email
+           17┆ )
+           18┆ cur.execute(query)
+

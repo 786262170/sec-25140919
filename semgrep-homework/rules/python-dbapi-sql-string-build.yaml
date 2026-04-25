@@ -1,0 +1,35 @@
+rules:
+  - id: python.dbapi.sql-string-build-to-execute
+    message: >-
+      Potential SQL injection: SQL is built with Python string interpolation
+      and then passed into execute(). Use parameterized queries instead.
+    languages:
+      - python
+    severity: ERROR
+    metadata:
+      category: security
+      cwe:
+        - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command"
+      technology:
+        - python
+        - sqlite
+      confidence: medium
+      likelihood: high
+      impact: high
+    patterns:
+      - pattern-either:
+          - patterns:
+              - pattern: |
+                  $QUERY = "..." % ...
+                  ...
+                  $CUR.execute($QUERY)
+          - patterns:
+              - pattern: |
+                  $QUERY = f"...{...}..."
+                  ...
+                  $CUR.execute($QUERY)
+          - patterns:
+              - pattern: |
+                  $QUERY = "...".format(...)
+                  ...
+                  $CUR.execute($QUERY)
