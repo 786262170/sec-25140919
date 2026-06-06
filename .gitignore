@@ -1,1 +1,24 @@
+# API Keys
+.env
+**/*.env
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Logs (keep run.txt, ignore other logs)
+logs/*
+!logs/run.txt
+
+# Binaries
+targets/challenge
+challenge
+challenge.zip
+
+# OS files
+.DS_Store
+
+# From remote
 semgrep-homework/report/*.html

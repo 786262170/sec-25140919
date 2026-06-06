@@ -1,0 +1,5 @@
+{
+  "vuln_type": "Buffer Overflow",
+  "location": "main at 0x401264",
+  "cause": "The main function uses fgets to read user input into a stack buffer of size 0x40 (64 bytes) without proper bounds checking, and the stack canary is disabled, allowing an attacker to overwrite the return address."
+}
