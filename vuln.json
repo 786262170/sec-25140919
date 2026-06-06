@@ -1,5 +1,5 @@
 {
-  "vuln_type": "Buffer Overflow",
-  "location": "main at 0x401264",
-  "cause": "The main function uses fgets to read user input into a stack buffer of size 0x40 (64 bytes) without proper bounds checking, and the stack canary is disabled, allowing an attacker to overwrite the return address."
+  "vuln_type": "stack_buffer_overflow",
+  "location": "main (FUN_00401264) at 0x00401377 (__strcpy_chk call)",
+  "cause": "User input read via fgets into a 128-byte buffer is copied via __strcpy_chk to a destination buffer (local_a8 at rsp) with a specified size of only 0x10 (16 bytes), while the length check allows input up to 100 characters, causing a stack buffer overflow when input exceeds 15 characters."
 }

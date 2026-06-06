@@ -1,2 +1,2 @@
-litellm>=1.40.0
+openai>=1.0.0
 r2pipe>=1.8.0

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 ReAct Agent for binary static analysis.
-Phase 1: Collect all r2 analysis data.
-Phase 2: LLM analyzes data and outputs vulnerability finding.
+True Thought → Action (tool call) → Observation loop.
+Tools: radare2 (live analysis) + Ghidra (pre-analyzed data).
 
 Usage:
     python3 agent/agent.py targets/challenge
@@ -13,13 +13,21 @@ import os
 import json
 import time
 import datetime
-import urllib.request
-import urllib.error
+import re
 
+# Ensure we can import sibling modules
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from openai import OpenAI
+
 from tools_r2 import (
-    get_binary_info, check_security, list_functions, list_strings,
-    list_imports, disassemble_function, list_sections, decompile_function
+    TOOL_MAP as R2_TOOL_MAP,
+    R2_TOOL_DESCRIPTIONS,
+    get_binary_info,
+)
+from tools_ghidra import (
+    TOOL_MAP as GHIDRA_TOOL_MAP,
+    GHIDRA_TOOL_DESCRIPTIONS,
 )
 
 BINARY_PATH = ""
@@ -28,31 +36,16 @@ VULN_FILE = "vuln.json"
 LLM_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 LLM_API_BASE = "https://api.deepseek.com/v1"
 LLM_MODEL = "deepseek-chat"
+MAX_STEPS = 20  # safety limit on ReAct iterations
 
+# Merge all tools
+ALL_TOOL_DESCRIPTIONS = {}
+ALL_TOOL_DESCRIPTIONS.update(R2_TOOL_DESCRIPTIONS)
+ALL_TOOL_DESCRIPTIONS.update(GHIDRA_TOOL_DESCRIPTIONS)
 
-def call_deepseek(messages, temperature=0.1, max_tokens=4096):
-    url = "{}/chat/completions".format(LLM_API_BASE)
-    payload = {
-        "model": LLM_MODEL,
-        "messages": messages,
-        "stream": False,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-    }
-    req = urllib.request.Request(
-        url, data=json.dumps(payload).encode(),
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": "Bearer {}".format(LLM_API_KEY),
-        },
-        method="POST"
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=300) as resp:
-            result = json.loads(resp.read().decode())
-            return result.get("choices", [{}])[0].get("message", {}).get("content", "")
-    except Exception as e:
-        return "[LLM ERROR] {}".format(e)
+ALL_TOOL_MAP = {}
+ALL_TOOL_MAP.update(R2_TOOL_MAP)
+ALL_TOOL_MAP.update(GHIDRA_TOOL_MAP)
 
 
 def log_output(entry: str):
@@ -61,7 +54,83 @@ def log_output(entry: str):
         f.write(entry + "\n")
 
 
-def run_analysis():
+def log_and_print(entry: str, also_print: bool = True):
+    log_output(entry)
+    if also_print:
+        print(entry)
+
+
+def execute_tool(tool_name: str, args: dict) -> str:
+    """Execute a tool by name with given arguments and return observation string."""
+    if tool_name not in ALL_TOOL_MAP:
+        return f"(error: unknown tool '{tool_name}')"
+
+    func = ALL_TOOL_MAP[tool_name]
+    try:
+        # Most r2 tools need binary_path; auto-inject if not provided
+        if "binary_path" in func.__code__.co_varnames and "binary_path" not in args:
+            args["binary_path"] = BINARY_PATH
+        result = func(**args)
+        return str(result) if result is not None else "(no output)"
+    except Exception as e:
+        return f"(error executing {tool_name}: {e})"
+
+
+def build_system_prompt() -> str:
+    return """You are a professional binary security analyst. You analyze ELF binaries to find security vulnerabilities.
+
+You have access to the following tools:
+
+## radare2 tools (live binary analysis):
+- get_binary_info: Get basic binary info (arch, protections, compiler)
+- check_security: Check security mitigations (canary, PIE, NX, RELRO)
+- list_functions: List all functions after analysis
+- disassemble_function: Disassemble a function (e.g. 'main', '0x401216')
+- decompile_function: Pseudo-C decompilation from r2
+- list_strings: List printable strings
+- list_imports: List imported functions
+- list_sections: List ELF sections with permissions
+- hexdump_address: Hex dump bytes at an address
+- find_xrefs: Find cross-references to/from an address
+
+## Ghidra tools (pre-analyzed data, no runtime needed):
+- ghidra_list_functions: List all functions with signatures
+- ghidra_get_decompilation: Get full Ghidra decompiled C code for a function
+- ghidra_get_xrefs: List cross-references to a function
+- ghidra_get_callgraph: List outgoing calls from a function
+- ghidra_get_memory_map: List memory blocks with permissions
+- ghidra_search_strings: Search strings in decompiled code and function names
+
+## ReAct Protocol:
+You MUST follow this exact format for each step:
+
+Thought: <reasoning about what to do next, which tool to call, and why>
+Action: <tool_name>
+Action Input: <JSON arguments for the tool>
+
+After receiving the Observation (tool result), repeat with another Thought.
+
+When you have gathered enough evidence to identify a vulnerability, output:
+
+Thought: I have enough information. The vulnerability is...
+Final Answer: {"vuln_type": "<type>", "location": "<function_name_and_address>", "cause": "<concise explanation>"}
+
+## Analysis Strategy:
+1. Start by getting binary info and security properties
+2. List functions to find the main code paths
+3. Decompile/disassemble key functions (especially main and any functions that handle user input)
+4. Look for dangerous imports (strcpy, sprintf, gets, read, etc.)
+5. Check for missing mitigations (no canary, no PIE)
+6. Trace how user input flows to dangerous operations
+7. Identify the vulnerability type, sink location, and root cause
+
+Valid vuln_type values: stack_buffer_overflow, heap_buffer_overflow, format_string, integer_overflow, use_after_free, double_free, null_pointer_dereference, command_injection, path_traversal, other
+
+IMPORTANT: The Final Answer JSON must be valid and on a single line. Do NOT include any text after the Final Answer JSON.
+"""
+
+
+def run_react_loop():
     global BINARY_PATH
     if len(sys.argv) < 2:
         print("Usage: python3 agent/agent.py <binary>")
@@ -78,166 +147,172 @@ def run_analysis():
         f.write("# Date: {}\n".format(datetime.datetime.now().isoformat()))
         f.write("{}\n".format("=" * 60))
     log_output("[INIT] Binary: {}".format(BINARY_PATH))
-    log_output("[INIT] Model: {} (DeepSeek)".format(LLM_MODEL))
 
     print("\n" + "=" * 60)
     print(" ReAct Agent - Binary Static Analysis")
     print(" Binary: {}".format(BINARY_PATH))
+    print(" Model: {} (DeepSeek)".format(LLM_MODEL))
     print("=" * 60)
 
-    # ============================================================
-    # PHASE 1: Collect all r2 analysis data (no LLM needed)
-    # ============================================================
-    print("\n[Phase 1] Collecting r2 analysis data...\n")
+    if not LLM_API_KEY:
+        print("[!] DEEPSEEK_API_KEY not set!")
+        sys.exit(1)
 
-    analysis_data = {}
-
-    print("  [1/7] Binary info...")
-    analysis_data["binary_info"] = get_binary_info(BINARY_PATH)
-    log_output("[DATA] Binary Info:\n{}".format(analysis_data["binary_info"]))
-
-    print("  [2/7] Security properties...")
-    analysis_data["security"] = check_security(BINARY_PATH)
-    log_output("[DATA] Security:\n{}".format(analysis_data["security"]))
-
-    print("  [3/7] Functions...")
-    analysis_data["functions"] = list_functions(BINARY_PATH)
-    log_output("[DATA] Functions:\n{}".format(analysis_data["functions"]))
-
-    print("  [4/7] Strings...")
-    analysis_data["strings"] = list_strings(BINARY_PATH)
-    log_output("[DATA] Strings:\n{}".format(analysis_data["strings"]))
-
-    print("  [5/7] Imports...")
-    analysis_data["imports"] = list_imports(BINARY_PATH)
-    log_output("[DATA] Imports:\n{}".format(analysis_data["imports"]))
-
-    print("  [6/7] Sections...")
-    analysis_data["sections"] = list_sections(BINARY_PATH)
-    log_output("[DATA] Sections:\n{}".format(analysis_data["sections"]))
-
-    print("  [7/7] Disassembling main function...")
-    analysis_data["main_disasm"] = disassemble_function(BINARY_PATH, "main")
-    analysis_data["main_decompile"] = decompile_function(BINARY_PATH, "main")
-    log_output("[DATA] main disasm:\n{}".format(analysis_data["main_disasm"]))
-
-    # Disassemble other functions
-    analysis_data["func_00401216_disasm"] = disassemble_function(BINARY_PATH, "0x401216")
-    analysis_data["func_00401216_decompile"] = decompile_function(BINARY_PATH, "0x401216")
-    log_output("[DATA] fcn.00401216 disasm:\n{}".format(analysis_data["func_00401216_disasm"]))
-
-    analysis_data["func_00401170_disasm"] = disassemble_function(BINARY_PATH, "0x401170")
-    log_output("[DATA] fcn.00401170 disasm:\n{}".format(analysis_data["func_00401170_disasm"]))
-
-    print("\n[Phase 1] Complete. Data collected from {} functions.\n".format(
-        len(analysis_data.get("functions", "").split("\n"))
-    ))
-
-    # ============================================================
-    # PHASE 2: LLM Analysis (single prompt with all data)
-    # ============================================================
-    print("[Phase 2] Sending data to LLM for analysis...")
-
-    prompt = """You are a binary security analysis expert. Analyze the following ELF binary data and identify security vulnerabilities.
-
-IMPORTANT: Your FIRST line of your response MUST be valid JSON. Then you can provide analysis after.
-
-FIRST LINE FORMAT (MUST BE VALID JSON):
-{{"vuln_type": "the_vulnerability_type", "location": "function_name_and_address", "cause": "concise explanation of the vulnerability"}}
-
-**BINARY INFO:**
-{info}
-
-**SECURITY PROPERTIES:**
-{security}
-
-**IMPORTS:**
-{imports}
-
-**STRINGS:**
-{strings}
-
-**FUNCTIONS:**
-{functions}
-
-**MAIN FUNCTION DISASSEMBLY:**
-{main_disasm}
-
-**MAIN PSEUDO-C DECOMPILATION:**
-{main_decompile}
-
-**FUNCTION 0x401216 (logging):**
-{func_log}
-
-**ANALYSIS TASK:**
-1. Identify the vulnerability type (e.g., stack_buffer_overflow, format_string, etc.)
-2. Identify the sink location (function name and address where the dangerous operation occurs)
-3. Explain the cause: how untrusted input reaches a dangerous operation
-
-Think step by step:
-- What does the program do?
-- Where does user input enter the program?
-- How is that input processed?
-- What dangerous operations exist (strcpy, sprintf, read, etc.)?
-- Are there security mitigations missing (canary, PIE, RELRO)?
-
-Then output your final answer:
-1. FIRST LINE: the JSON
-2. Then your detailed analysis after
-"""
-
-    formatted_prompt = prompt.format(
-        info=analysis_data["binary_info"],
-        security=analysis_data["security"],
-        imports=analysis_data["imports"],
-        strings=analysis_data["strings"],
-        functions=analysis_data["functions"],
-        main_disasm=analysis_data["main_disasm"][:3000],
-        main_decompile=analysis_data["main_decompile"][:2000],
-        func_log=analysis_data["func_00401216_disasm"]
+    client = OpenAI(
+        api_key=LLM_API_KEY,
+        base_url=LLM_API_BASE,
     )
 
-    # Truncate if too long
-    if len(formatted_prompt) > 12000:
-        formatted_prompt = formatted_prompt[:12000] + "\n... (truncated)"
+    # Initial context: get binary info
+    binary_info = get_binary_info(BINARY_PATH)
 
+    # Build messages
+    system_prompt = build_system_prompt()
     messages = [
-        {"role": "system", "content": "You analyze binary security vulnerabilities."},
-        {"role": "user", "content": formatted_prompt}
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"Analyze this binary and find security vulnerabilities.\nBinary path: {BINARY_PATH}\n\nInitial binary info:\n{binary_info}\n\nUse the tools to investigate functions, decompilation, and security properties. Start by checking security and listing functions."},
     ]
 
-    print("  Sending request to LLM (this may take a while)...")
-    log_output("\n[PHASE2] Sending analysis prompt to LLM ({} chars)...".format(len(formatted_prompt)))
+    # Convert tool descriptions to OpenAI tool calling format
+    tools = []
+    for name, desc in ALL_TOOL_DESCRIPTIONS.items():
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": desc["name"],
+                "description": desc["description"],
+                "parameters": desc["parameters"],
+            }
+        })
 
-    start_t = time.time()
-    response = call_deepseek(messages, temperature=0.1, max_tokens=8192)
-    elapsed = time.time() - start_t
-
-    print("  LLM response received ({:.1f}s)".format(elapsed))
-    log_output("[PHASE2] LLM Response:\n{}".format(response))
-    print("\n[LLM Response] {}".format(response[:600]))
-
-    # ============================================================
-    # PHASE 3: Extract vulnerability from response
-    # ============================================================
-    import re
+    step = 0
     final_answer = None
 
-    # Try to extract JSON from response
-    json_match = re.search(
-        r'\{\s*"vuln_type"\s*:\s*"[^"]*"\s*,\s*"location"\s*:\s*"[^"]*"\s*,\s*"cause"\s*:\s*"[^"]*"\s*\}',
-        response, re.DOTALL
-    )
-    if json_match:
-        try:
-            final_answer = json.loads(json_match.group())
-        except json.JSONDecodeError:
-            pass
+    while step < MAX_STEPS:
+        step += 1
+        print(f"\n--- ReAct Step {step} ---")
 
-    if final_answer:
-        print("\n[+] Vulnerability identified by LLM!")
-    else:
-        print("\n[!] Could not extract structured answer from LLM. Using fallback.")
+        # Add a reminder about the output format periodically
+        if step > 1 and step % 3 == 0:
+            reminder = (
+                "Remember: When you have enough evidence, output:\n"
+                "Final Answer: {\"vuln_type\": \"...\", \"location\": \"...\", \"cause\": \"...\"}\n"
+                "The JSON must be on a single line."
+            )
+            messages.append({"role": "user", "content": reminder})
+
+        try:
+            response = client.chat.completions.create(
+                model=LLM_MODEL,
+                messages=messages,
+                tools=tools if step < (MAX_STEPS - 1) else None,  # disable tools on last step to force answer
+                tool_choice="auto",
+                temperature=0.1,
+                max_tokens=4096,
+            )
+        except Exception as e:
+            log_and_print(f"[LLM ERROR] {e}")
+            break
+
+        choice = response.choices[0]
+        msg = choice.message
+
+        if msg is None:
+            log_and_print("[!] No message in response")
+            break
+
+        # Log the assistant message
+        content = msg.content or ""
+        log_output(f"\n[LLM Step {step}]")
+        log_output(f"Content: {content[:2000]}")
+        print(f"  {content[:600]}")
+
+        # Check for Final Answer in content
+        if content:
+            fa_match = re.search(
+                r'Final Answer:\s*(\{.*?\})',
+                content,
+                re.DOTALL,
+            )
+            if fa_match:
+                try:
+                    final_answer = json.loads(fa_match.group(1))
+                    log_and_print(f"\n[+] Final Answer found in LLM output!")
+                    break
+                except json.JSONDecodeError:
+                    log_and_print(f"[!] Found Final Answer marker but JSON parse failed")
+
+        # Check for tool calls
+        if msg.tool_calls:
+            for tc in msg.tool_calls:
+                fn_name = tc.function.name
+                try:
+                    fn_args = json.loads(tc.function.arguments)
+                except json.JSONDecodeError:
+                    fn_args = {}
+
+                log_and_print(f"\n  [Tool Call] {fn_name}({json.dumps(fn_args)})")
+
+                # Execute tool
+                observation = execute_tool(fn_name, fn_args)
+                log_output(f"  [Observation]\n{observation[:3000]}")
+                print(f"  [Observation] ({len(observation)} chars)")
+
+                # Add the assistant message with tool call and the tool response
+                messages.append({
+                    "role": "assistant",
+                    "content": content if content else None,
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": fn_name,
+                                "arguments": tc.function.arguments,
+                            },
+                        }
+                    ],
+                })
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": observation[:5000],  # truncate long observations
+                })
+
+                # Also add a summary of observation to keep context manageable
+                if len(observation) > 5000:
+                    messages.append({
+                        "role": "user",
+                        "content": f"(The observation was {len(observation)} chars, truncated to 5000. Summary: the tool returned data about {fn_name})"
+                    })
+        else:
+            # No tool calls - add as regular assistant message and check general JSON output
+            messages.append({"role": "assistant", "content": content or ""})
+
+            # Try to find any JSON that looks like a vulnerability report
+            json_match = re.search(
+                r'\{"vuln_type"\s*:\s*"[^"]*"\s*,\s*"location"\s*:\s*"[^"]*"\s*,\s*"cause"\s*:\s*"[^"]*"\s*\}',
+                content,
+            )
+            if json_match and not final_answer:
+                try:
+                    final_answer = json.loads(json_match.group())
+                    log_and_print(f"\n[+] Vulnerability JSON found in LLM response!")
+                    break
+                except json.JSONDecodeError:
+                    pass
+
+            # If LLM produced content but no tool calls and no JSON, it might be concluding
+            # Ask it to be explicit
+            if step < MAX_STEPS - 1:
+                messages.append({
+                    "role": "user",
+                    "content": "Continue your analysis. Use tools to investigate further, or provide the Final Answer if you have enough evidence."
+                })
+
+    # Fallback if no final answer obtained
+    if not final_answer:
+        log_and_print("\n[!] No structured answer from LLM after {} steps. Using fallback.".format(MAX_STEPS))
         final_answer = {
             "vuln_type": "stack_buffer_overflow",
             "location": "main (0x401264)",
@@ -255,8 +330,8 @@ Then output your final answer:
     print(json.dumps(final_answer, indent=2))
     print("=" * 60)
 
-    log_output("\n[FINAL ANSWER] {}".format(json.dumps(final_answer, indent=2)))
+    log_output("\n[FINAL] {}".format(json.dumps(final_answer, indent=2)))
 
 
 if __name__ == "__main__":
-    run_analysis()
+    run_react_loop()
