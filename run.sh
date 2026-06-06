@@ -5,9 +5,9 @@
 set -e
 
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BINARY="${PROJECT_DIR}/targets/challenge"
+BINARY="${PROJECT_DIR}/agent/challenge"
 AGENT="${PROJECT_DIR}/agent/agent.py"
-LOG_DIR="${PROJECT_DIR}/logs"
+LOG_DIR="${PROJECT_DIR}/agent/logs"
 
 echo "[*] ReAct Agent Static Analysis"
 echo "[*] Project: ${PROJECT_DIR}"
@@ -41,4 +41,4 @@ python3 "${AGENT}" "${BINARY}"
 echo ""
 echo "[*] Done."
 echo "    Log:  ${LOG_DIR}/run.txt"
-echo "    Vuln: ${PROJECT_DIR}/vuln.json"
+echo "    Vuln: ${PROJECT_DIR}/agent/vuln.json"

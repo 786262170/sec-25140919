@@ -5,7 +5,8 @@ True Thought → Action (tool call) → Observation loop.
 Tools: radare2 (live analysis) + Ghidra (pre-analyzed data).
 
 Usage:
-    python3 agent/agent.py targets/challenge
+    python3 agent/agent.py challenge   # from agent/ directory
+    python3 agent/agent.py agent/challenge  # from project root
 """
 
 import sys
@@ -30,9 +31,10 @@ from tools_ghidra import (
     GHIDRA_TOOL_DESCRIPTIONS,
 )
 
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 BINARY_PATH = ""
-LOG_FILE = "logs/run.txt"
-VULN_FILE = "vuln.json"
+LOG_FILE = os.path.join(SCRIPT_DIR, "logs/run.txt")
+VULN_FILE = os.path.join(SCRIPT_DIR, "vuln.json")
 LLM_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 LLM_API_BASE = "https://api.deepseek.com/v1"
 LLM_MODEL = "deepseek-chat"
@@ -136,10 +138,13 @@ def run_react_loop():
         print("Usage: python3 agent/agent.py <binary>")
         sys.exit(1)
 
-    BINARY_PATH = os.path.abspath(sys.argv[1])
+    binary_arg = sys.argv[1]
+    if not os.path.isabs(binary_arg):
+        binary_arg = os.path.join(SCRIPT_DIR, binary_arg)
+    BINARY_PATH = os.path.abspath(binary_arg)
 
     # Init log
-    os.makedirs("logs", exist_ok=True)
+    os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
     with open(LOG_FILE, "w") as f:
         f.write("# ReAct Agent Static Analysis Log\n")
         f.write("# Binary: {}\n".format(BINARY_PATH))
