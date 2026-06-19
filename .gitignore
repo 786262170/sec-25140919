@@ -7,10 +7,16 @@ __pycache__/
 *.pyc
 *.pyo
 *.egg-info/
+.venv/
 
 # Logs (keep run.txt, ignore other logs)
 agent/logs/*
 !agent/logs/run.txt
+
+# Build artifacts
+angr-agent/crackme
+angr-agent/crackme-linux.o
+angr-agent/*.dSYM/
 
 # OS files
 .DS_Store

@@ -1,0 +1,15 @@
+{
+  "password": "AZcE",
+  "success_output": "check_password returned 1",
+  "verification": {
+    "attempted": true,
+    "binary": "/Users/yangchangye/Documents/北交大-学习/第二学期/开源软件/react-agent-work/angr-agent/crackme",
+    "returncode": 0,
+    "stdout": "Enter password: Success! Flag is found.\n",
+    "stderr": "",
+    "success": true
+  },
+  "avoided_paths": 2,
+  "rounds": 3,
+  "mode": "demo"
+}
